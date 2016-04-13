@@ -1,8 +1,9 @@
 (ns slacker.server
-  (:use [slacker common serialization protocol])
+  (:use [slacker common serialization])
   (:use [slacker.server http])
   (:use [link core tcp http])
   (:require [clojure.tools.logging :as log]
+            [slacker.protocol :as protocol]
             [slacker.acl.core :as acl]
             [slacker.interceptor :as interceptor]
             [link.ssl :refer [ssl-handler-from-jdk-ssl-context]]
@@ -41,9 +42,10 @@
 ;; request data structure:
 ;; [version transaction-id [request-type [content-type func-name params]]]
 (defn- map-req-fields [req]
-  (assoc (zipmap [:content-type :fname :data]
-                 (second (nth req 2)))
-    :tid (second req)))
+  (let [[_ [tid [_ data]]] req]
+    (println req)
+    (assoc (zipmap [:content-type :fname :data] data)
+           :tid tid)))
 
 (defn- look-up-function [req funcs]
   (if-let [func (funcs (:fname req))]
@@ -79,8 +81,8 @@
   (assoc req :result (serialize (:content-type req) (:result req))))
 
 (defn- map-response-fields [req]
-  [version (:tid req) [(:packet-type req)
-                       (map req [:content-type :code :result])]])
+  [protocol/v5 [(:tid req) [(:packet-type req)
+                            (map req [:content-type :code :result])]]])
 
 (defn- assoc-current-thread [req running-threads]
   (if running-threads
@@ -99,16 +101,16 @@
   req)
 
 (defn pong-packet [tid]
-  [version tid [:type-pong]])
-(defn protocol-mismatch-packet [tid]
-  [version tid [:type-error [:protocol-mismatch]]])
+  [protocol/v5 [tid [:type-pong]]])
+#_(defn protocol-mismatch-packet [tid]
+  [protocol/v5 [tid [:type-error [:protocol-mismatch]]]])
 (defn invalid-type-packet [tid]
-  [version tid [:type-error [:invalid-packet]]])
+  [protocol/v5 [tid [:type-error [:invalid-packet]]]])
 (defn acl-reject-packet [tid]
-  [version tid [:type-error [:acl-reject]]])
+  [protocol/v5 [tid [:type-error [:acl-reject]]]])
 (defn make-inspect-ack [tid data]
-  [version tid [:type-inspect-ack
-            [(serialize :clj data :string)]]])
+  [protocol/v5 [tid [:type-inspect-ack
+                     [(serialize :clj data :string)]]]])
 
 (defn build-server-pipeline [funcs interceptors running-threads]
   #(-> %
@@ -129,8 +131,7 @@
 ;; [version tid  [request-type [cmd data]]]
 (defn build-inspect-handler [funcs]
   (fn [req]
-    (let [tid (second req)
-          [cmd data] (second (nth req 2))
+    (let [[_ [tid [_ [cmd data]]]] req
           data (deserialize :clj data :string)]
       (make-inspect-ack
        tid
@@ -145,16 +146,17 @@
          nil)))))
 
 (defn interrupt-handler [packet client-info running-threads]
-  (let [[target-tid] (second (nth packet 2))
+  (let [[_ [_ [_ [target-tid]]]] packet
         key (thread-map-key client-info target-tid)]
     (log/debug "About to interrupt" key)
     (when-let [thread (get @running-threads key)]
       (log/debug "Interrupted thread" thread)
-      (.interrupt thread)
+      (.interrupt ^Thread thread)
       (swap! running-threads dissoc key))
     nil))
 
-(defmulti -handle-request (fn [p & _] (first (nth p 2))))
+;; p: [version [tid [type ...]]]
+(defmulti -handle-request (fn [p & _] (let [[_ [_ [t]]] p] t)))
 (defmethod -handle-request :type-request [req
                                           server-pipeline
                                           client-info
@@ -173,9 +175,6 @@
 (defn handle-request [server-pipeline req client-info inspect-handler acl running-threads]
   (log/debug req)
   (cond
-   (not= version (first req))
-   (protocol-mismatch-packet 0)
-
    ;; acl enabled
    (and (not-empty acl)
         (not (acl/authorize client-info acl)))
@@ -191,6 +190,7 @@
         inspect-handler (build-inspect-handler funcs)]
     (create-handler
      (on-message [ch data]
+                 (println "====" data)
                  (log/debug "data received" data)
                  (with-executor executor
                    (let [client-info {:remote-addr (remote-addr ch)}
@@ -274,8 +274,8 @@
         handler (create-server-handler executor funcs interceptors acl running-threads)
         ssl-handler (when ssl-context
                       (ssl-handler-from-jdk-ssl-context ssl-context false))
-        handlers [(netty-encoder slacker-base-codec)
-                  (netty-decoder slacker-base-codec)
+        handlers [(netty-encoder protocol/slacker-root-codec)
+                  (netty-decoder protocol/slacker-root-codec)
                   handler]
         handlers (if ssl-handler
                    (conj (seq handlers) ssl-handler) handlers)]
