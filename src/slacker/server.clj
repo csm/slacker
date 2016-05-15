@@ -42,9 +42,10 @@
 ;; request data structure:
 ;; [version transaction-id [request-type [content-type func-name params]]]
 (defn- map-req-fields [req]
-  (let [[_ [tid [_ data]]] req]
+  (let [[prot-ver [tid [_ data]]] req]
     (assoc (zipmap [:content-type :fname :data :extensions] data)
-           :tid tid)))
+           :tid tid
+           :protocol-version prot-ver)))
 
 (defn- look-up-function [req funcs]
   (if-let [func (funcs (:fname req))]
@@ -80,8 +81,9 @@
   (assoc req :result (serialize (:content-type req) (:result req))))
 
 (defn- map-response-fields [req]
-  (protocol/protocol-6 [(:tid req) [(:packet-type req)
-                                    (map req [:content-type :code :result :extensions])]]))
+  (protocol/of (:protocol-version req)
+               [(:tid req) [(:packet-type req)
+                            (map req [:content-type :code :result :extensions])]]))
 
 (defn- assoc-current-thread [req running-threads]
   (if running-threads
@@ -100,16 +102,16 @@
   req)
 
 (defn pong-packet [tid]
-  (protocol/protocol-6 [tid [:type-pong]]))
+  (protocol/of protocol/v6 [tid [:type-pong]]))
 #_(defn protocol-mismatch-packet [tid]
   [protocol/v5 [tid [:type-error [:protocol-mismatch]]]])
 (defn invalid-type-packet [tid]
-  (protocol/protocol-6 [tid [:type-error [:invalid-packet]]]))
-(defn acl-reject-packet [tid]
-  (protocol/protocol-6 [tid [:type-error [:acl-reject]]]))
-(defn make-inspect-ack [tid data]
-  (protocol/protocol-6 [tid [:type-inspect-ack
-                             [(serialize :clj data :string)]]]))
+  (protocol/of protocol/v6 [tid [:type-error [:invalid-packet]]]))
+(defn acl-reject-packet [prot-ver tid]
+  (protocol/of prot-ver [tid [:type-error [:acl-reject]]]))
+(defn make-inspect-ack [prot-ver tid data]
+  (protocol/of prot-ver [tid [:type-inspect-ack
+                              [(serialize :clj data :string)]]]))
 
 (defn build-server-pipeline [funcs interceptors running-threads]
   #(-> %
@@ -130,9 +132,10 @@
 ;; [version tid  [request-type [cmd data]]]
 (defn build-inspect-handler [funcs]
   (fn [req]
-    (let [[_ [tid [_ [cmd data]]]] req
+    (let [[prot-ver [tid [_ [cmd data]]]] req
           data (deserialize :clj data :string)]
       (make-inspect-ack
+       prot-ver
        tid
        (case cmd
          :functions
@@ -177,7 +180,7 @@
    ;; acl enabled
    (and (not-empty acl)
         (not (acl/authorize client-info acl)))
-   (acl-reject-packet (second req))
+   (acl-reject-packet (first req) (second req))
 
    ;; handle request
 
