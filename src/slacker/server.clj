@@ -192,7 +192,6 @@
         inspect-handler (build-inspect-handler funcs)]
     (create-handler
      (on-message [ch data]
-                 (println "====" data)
                  (log/debug "data received" data)
                  (with-executor executor
                    (let [client-info {:remote-addr (remote-addr ch)}
